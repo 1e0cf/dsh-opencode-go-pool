@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'bun:test'
 
-import { assessKey, type KeyState, type MeterReading, type UsageReading } from '../src/policy.ts'
+import {
+  assessKey,
+  DEFAULT_THRESHOLD_PERCENT,
+  selectKey,
+  type KeyAssessment,
+  type KeyState,
+  type MeterReading,
+  type SelectionContext,
+  type UsageReading,
+} from '../src/policy.ts'
 
 function meter(
   percent: number | null,
@@ -119,5 +128,107 @@ describe('assessKey', () => {
 
     expect(verdict.usable).toBe(false)
     expect(verdict.worstMeter).toBe('weekly')
+  })
+})
+
+/** Assessment of one key whose monthly window reads `percent`. */
+function key(id: string, percent: number | null, status = 'ok'): KeyAssessment {
+  return assessKey({
+    id,
+    usage: percent === null ? null : usage({ monthly: meter(percent, status) }),
+    observedAt: percent === null ? null : 1_700_000_000_000,
+  })
+}
+
+function context(
+  keys: readonly KeyAssessment[],
+  pin?: string,
+  affinity = 'root',
+): SelectionContext {
+  return { affinity, keys, pin, thresholdPercent: DEFAULT_THRESHOLD_PERCENT }
+}
+
+describe('selectKey', () => {
+  it('keeps a pinned key that can still serve, however loaded the others are', () => {
+    const selection = selectKey('threshold', context([key('a', 12), key('b', 1)], 'a'))
+
+    expect(selection).toEqual({ keyId: 'a', pinned: true, avoided: [] })
+  })
+
+  it('keeps a pinned key above the threshold while it still serves', () => {
+    const selection = selectKey('threshold', context([key('a', 95), key('b', 1)], 'a'))
+
+    expect(selection?.keyId).toBe('a')
+    expect(selection?.pinned).toBe(true)
+  })
+
+  it('starts an unpinned session off the keys above the threshold', () => {
+    const selection = selectKey('sticky', context([key('a', 95), key('b', 1)]))
+
+    expect(selection).toEqual({ keyId: 'b', pinned: false, avoided: ['a'] })
+  })
+
+  it('re-pins when the pinned key can no longer serve', () => {
+    const selection = selectKey(
+      'threshold',
+      context([key('a', 100, 'rate-limited'), key('b', 5)], 'a'),
+    )
+
+    expect(selection).toEqual({ keyId: 'b', pinned: false, avoided: [] })
+  })
+
+  it('sticky fills the first configured key before touching the next', () => {
+    const selection = selectKey('sticky', context([key('a', 10), key('b', 2)]))
+
+    expect(selection?.keyId).toBe('a')
+    expect(selection?.pinned).toBe(false)
+  })
+
+  it('threshold picks the least loaded key', () => {
+    const selection = selectKey('threshold', context([key('a', 10), key('b', 2), key('c', 6)]))
+
+    expect(selection?.keyId).toBe('b')
+  })
+
+  it('round-robin is stable for one affinity and spreads distinct ones', () => {
+    const keys = [key('a', 1), key('b', 1), key('c', 1)]
+    const first = selectKey('round-robin', context(keys, undefined, 'session-a'))
+    const again = selectKey('round-robin', context(keys, undefined, 'session-a'))
+    const chosen = new Set(
+      Array.from({ length: 40 }, (_, index) =>
+        selectKey('round-robin', context(keys, undefined, `session-${index}`)),
+      ).map((selection) => selection?.keyId),
+    )
+
+    expect(first?.keyId).toBe(again?.keyId)
+    expect(chosen.size).toBeGreaterThan(1)
+  })
+
+  it('treats an unobserved key as empty rather than refusing it', () => {
+    const selection = selectKey('threshold', context([key('a', 80), key('b', null)]))
+
+    expect(selection?.keyId).toBe('b')
+  })
+
+  it('falls back to a nearly spent key instead of refusing to serve', () => {
+    const selection = selectKey('threshold', context([key('a', 95), key('b', 97)]))
+
+    expect(selection?.keyId).toBe('a')
+    expect(selection?.avoided).toEqual([])
+  })
+
+  it('returns null when no key can serve', () => {
+    const selection = selectKey(
+      'threshold',
+      context([key('a', 100, 'rate-limited'), key('b', 100, 'rate-limited')]),
+    )
+
+    expect(selection).toBeNull()
+  })
+
+  it('treats a pin naming a key that no longer exists as unpinned', () => {
+    const selection = selectKey('sticky', context([key('a', 10)], 'retired'))
+
+    expect(selection).toEqual({ keyId: 'a', pinned: false, avoided: [] })
   })
 })

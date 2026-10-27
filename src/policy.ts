@@ -1,11 +1,16 @@
 /**
- * Key health: the question "can this key serve right now", answered as a pure
- * function over the last usage reading. No clock, no network, no harness types,
- * so every rule here is unit-testable and the caller keeps all the I/O.
+ * Key decisions, as pure functions over plain data: no clock, no network, no
+ * harness types, so every rule is unit-testable and the caller keeps all I/O.
  *
- * The gateway reports its own verdict per usage window, and that verdict beats
- * any arithmetic on percentages: `rate-limited` is authoritative. Percentages
- * are only used to rank the keys that are still serving.
+ * Two different questions live here and must not be conflated:
+ *
+ * 1. *Can this key serve right now?* — {@link assessKey}. The gateway reports
+ *    its own verdict per usage window, and that verdict beats any arithmetic on
+ *    percentages: `rate-limited` is authoritative.
+ * 2. *Which key should serve this session?* — {@link selectKey}. A session
+ *    already pinned to a key that can still serve keeps it, whatever the load
+ *    policy prefers: moving a live session between accounts throws away the
+ *    gateway's prompt cache for the whole conversation prefix.
  *
  * @module dsh-opencode-go-pool/policy
  */
@@ -130,4 +135,107 @@ export function assessKey(state: KeyState): KeyAssessment {
     resetsAt: worstMeter === null ? null : (state.usage[worstMeter]?.resetsAt ?? null),
     observed,
   }
+}
+
+/** Strategies for choosing the key of a session that has no pin yet. */
+export type PolicyName = 'sticky' | 'threshold' | 'round-robin'
+
+/**
+ * Consumed share above which an unpinned session avoids a key. Chosen well
+ * below 100 so a session does not *start* on a key that is about to block
+ * mid-conversation, where moving away costs the cache.
+ */
+export const DEFAULT_THRESHOLD_PERCENT = 90
+
+/** Everything a policy may look at; the caller resolves it beforehand. */
+export interface SelectionContext {
+  /** Conversation affinity id; the unit a key is pinned to. */
+  readonly affinity: string
+  /** Assessments in configuration order. */
+  readonly keys: readonly KeyAssessment[]
+  /** Key already serving {@link affinity}, if any. */
+  readonly pin: string | undefined
+  /** Consumed share above which an unpinned session avoids a key. */
+  readonly thresholdPercent: number
+}
+
+/** Outcome of {@link selectKey}. */
+export interface Selection {
+  readonly keyId: string
+  /** True when the existing pin was kept, so the caller need not rewrite it. */
+  readonly pinned: boolean
+  /** Keys skipped only because they sit above the threshold, for diagnostics. */
+  readonly avoided: readonly string[]
+}
+
+/** FNV-1a over the affinity, so spreading needs no persisted counter. */
+function affinityHash(affinity: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < affinity.length; index += 1) {
+    hash ^= affinity.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash
+}
+
+/** Consumed share used for ordering; an unobserved key sorts as empty. */
+function consumedOf(assessment: KeyAssessment): number {
+  return assessment.consumed ?? 0
+}
+
+/**
+ * Choose the key that should serve one affinity.
+ *
+ * A pinned key that can still serve always wins, for every policy: the pin
+ * exists to protect the gateway prompt cache, and no load preference justifies
+ * moving a healthy conversation to another account. When the pin is gone or
+ * dead, the choice is made among usable keys — first avoiding keys above the
+ * threshold, then falling back to any usable key so a nearly-spent pool still
+ * serves instead of failing outright.
+ *
+ * @param policy - strategy for the unpinned case.
+ * @param context - assessments, current pin, and threshold.
+ * @returns the chosen key, or `null` when nothing can serve.
+ */
+export function selectKey(policy: PolicyName, context: SelectionContext): Selection | null {
+  const pinned =
+    context.pin === undefined ? undefined : context.keys.find((key) => key.id === context.pin)
+
+  if (pinned && pinned.usable) {
+    return { keyId: pinned.id, pinned: true, avoided: [] }
+  }
+
+  const usable = context.keys.filter((key) => key.usable)
+  if (usable.length === 0) return null
+
+  const belowThreshold = usable.filter((key) => consumedOf(key) < context.thresholdPercent)
+  const candidates = belowThreshold.length > 0 ? belowThreshold : usable
+  const avoided = usable.filter((key) => !candidates.includes(key)).map((key) => key.id)
+
+  return {
+    keyId: pick(policy, candidates, context.affinity),
+    pinned: false,
+    avoided,
+  }
+}
+
+/** Apply the strategy to a non-empty candidate list. */
+function pick(policy: PolicyName, candidates: readonly KeyAssessment[], affinity: string): string {
+  if (policy === 'round-robin') {
+    // Balanced hashing rather than a cursor: stable across restarts, spreads
+    // concurrent sessions, and leaves nothing to persist or repair.
+    return candidates[affinityHash(affinity) % candidates.length]!.id
+  }
+
+  if (policy === 'threshold') {
+    // Least loaded wins; configuration order breaks ties.
+    let best = candidates[0]!
+    for (const candidate of candidates) {
+      if (consumedOf(candidate) < consumedOf(best)) best = candidate
+    }
+    return best.id
+  }
+
+  // sticky: fill the first configured key before touching the next one.
+  return candidates[0]!.id
 }
