@@ -79,8 +79,12 @@ its window.
 
 Working: policy, pool, usage polling, pin storage, adapter, plugin wiring — 77 unit tests.
 
-Not yet verified against a live gateway, and no settings UI. The harness wiring (`src/index.ts`)
-has been reviewed against the harness source but not yet exercised inside a running harness.
+Verified at the wire level: one adapter per account produces requests with that account's
+credential, and `x-opencode-session` carries the lineage root while the raw session id travels
+separately ([docs/verification.md](docs/verification.md)).
+
+Not yet verified: the plugin running inside a live harness (route takeover, pins read back from the
+session log, background polling) and a real mid-conversation quota failure. No settings UI.
 
 ## Development
 
