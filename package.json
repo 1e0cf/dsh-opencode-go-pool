@@ -1,0 +1,47 @@
+{
+  "name": "dsh-opencode-go-pool",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin: OpenCode Go key pool with session-pinned rotation",
+  "license": "MIT",
+  "author": "Nikita Senin (1e0cf)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/1e0cf/dsh-opencode-go-pool.git"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20",
+    "bun": ">=1.4.4"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "opencode",
+    "opencode-go",
+    "key-pool",
+    "quota"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --target node --packages external --outdir lib",
+    "typecheck": "bun check",
+    "lint": "bun lint src tests",
+    "format": "bun fmt src tests",
+    "format:check": "bun fmt --check src tests",
+    "test": "bun test",
+    "gate": "bun run lint && bun run format:check && bun run typecheck && bun run test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4"
+  }
+}

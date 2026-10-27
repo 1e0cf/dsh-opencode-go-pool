@@ -1,0 +1,6 @@
+[fmt]
+printWidth = 100
+singleQuote = true
+semi = false
+
+[lint]
