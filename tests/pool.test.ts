@@ -130,6 +130,31 @@ describe('KeyPool resolution', () => {
     expect(pins.writes).toEqual(['root=b'])
   })
 
+  it('re-asks the store when a pin it already used stops applying', async () => {
+    // The store is what learns about a context rebuild, and it can learn while
+    // the process runs. A memoised pin would outlive its meaning.
+    let applies = true
+    const writes: string[] = []
+    const pins: PinStore = {
+      get: async () => (applies ? 'a' : undefined),
+      set: async (_affinity: string, keyId: string) => {
+        writes.push(keyId)
+        applies = true
+      },
+    }
+    const subject = pool({ pins, policy: 'threshold' })
+    subject.observe('a', usage(80), 1)
+    subject.observe('b', usage(10), 1)
+
+    const first = await subject.resolve('root')
+    applies = false
+    const second = await subject.resolve('root')
+
+    expect(first).toEqual({ keyId: 'a', pinned: true, avoided: [] })
+    expect(second).toEqual({ keyId: 'b', pinned: false, avoided: [] })
+    expect(writes).toEqual(['b'])
+  })
+
   it('shares the pin of the root affinity with anything resolving it', async () => {
     const pins = spyStore()
     const subject = pool({ pins })

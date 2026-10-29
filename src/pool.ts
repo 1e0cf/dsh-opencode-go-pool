@@ -244,10 +244,13 @@ export class KeyPool {
   }
 
   async #pinOf(conversation: string): Promise<string | undefined> {
-    const known = this.#known.get(conversation)
-    if (known !== undefined) return known
+    // The store answers, memory only remembers. A pin can stop applying while
+    // the process runs — a compaction rebuilds the context, and with it the
+    // gateway cache — so a memoised key must never short-circuit the question:
+    // the session would keep an account the log has already released it from.
+    if (this.#pins === undefined) return this.#known.get(conversation)
 
-    const own = await this.#pins?.get(conversation)
+    const own = await this.#pins.get(conversation)
     if (own !== undefined) {
       this.#known.set(conversation, own)
       return own
