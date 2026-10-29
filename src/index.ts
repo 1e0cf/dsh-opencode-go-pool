@@ -22,7 +22,7 @@
 import { PoolAdapter, type AdapterCall, type InnerAdapter } from './adapter.ts'
 import { resolveConfig, ROUTE, type KeyConfig, type ResolvedPoolConfig } from './config.ts'
 import { SessionPinStore, PIN_RECORD, type SessionPinPort } from './pins.ts'
-import { UsagePoller } from './poller.ts'
+import { UsagePoller, type PollTarget } from './poller.ts'
 import { KeyPool } from './pool.ts'
 import type { KeyUnusableReason } from './policy.ts'
 
@@ -362,21 +362,39 @@ export function apply(ctx: PluginContext, raw: unknown): void {
     )
 
     const offRegistration = registerRoute(ctx, adapter)
+    /** Keys already reported as missing a credential, so the log stays readable. */
+    const unpollable = new Set<string>()
 
     const poller = new UsagePoller({
       baseUrl: config.baseUrl,
       intervalMs: config.pollIntervalMs,
-      targets: async () =>
-        Promise.all(
-          config.keys.map(async (key) => {
+      // One account without a stored secret must not stop the others from
+      // being observed: the whole point of the pool is to keep serving.
+      targets: async () => {
+        const targets: PollTarget[] = []
+        for (const key of config.keys) {
+          try {
             const apiKey = await resolveSecret(ctx, key.apiKeyEnv)
-            return {
+            targets.push({
               keyId: key.id,
               apiKey,
               ...(key.orgId === undefined ? {} : { orgId: key.orgId }),
+            })
+            unpollable.delete(key.id)
+          } catch (error) {
+            if (!unpollable.has(key.id)) {
+              unpollable.add(key.id)
+              logger.warn(
+                'opencode-go-pool: key "%s" has no usable credential (%s); polling serves the other accounts',
+                key.id,
+                error instanceof Error ? error.message : String(error),
+              )
             }
-          }),
-        ),
+          }
+        }
+        return targets
+      },
+      onError: (error) => logger.warn('opencode-go-pool: usage sweep failed: %o', error),
       onOutcome: (outcome) => {
         if (outcome.ok) {
           pool.observe(outcome.keyId, outcome.usage, outcome.at)

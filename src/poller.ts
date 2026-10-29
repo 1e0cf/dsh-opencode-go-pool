@@ -95,6 +95,8 @@ export interface PollerOptions extends PollDeps {
   readonly targets: () => readonly PollTarget[] | Promise<readonly PollTarget[]>
   /** Applied to every outcome of every sweep. */
   readonly onOutcome: (outcome: PollOutcome) => void
+  /** Observe a sweep that failed before it produced outcomes. */
+  readonly onError?: (error: unknown) => void
   /** Sweep interval, {@link DEFAULT_INTERVAL_MS} by default. */
   readonly intervalMs?: number
 }
@@ -143,8 +145,9 @@ export class UsagePoller {
   async #sweep(): Promise<void> {
     try {
       await this.once()
-    } catch {
+    } catch (error) {
       // A throwing target resolver must not kill the loop; the next sweep retries.
+      this.#options.onError?.(error)
     }
     if (this.#stopped) return
     const interval = this.#options.intervalMs ?? DEFAULT_INTERVAL_MS

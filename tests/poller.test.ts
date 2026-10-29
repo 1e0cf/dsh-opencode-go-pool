@@ -110,6 +110,24 @@ describe('UsagePoller', () => {
     expect(seen).toEqual([])
   })
 
+  it('reports a sweep that failed before producing outcomes', async () => {
+    const reported: unknown[] = []
+    const poller = new UsagePoller({
+      targets: () => {
+        throw new Error('no usable credentials')
+      },
+      onOutcome: () => {},
+      onError: (error) => reported.push(error),
+    })
+
+    poller.start()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    poller.stop()
+
+    expect(reported).toHaveLength(1)
+    expect((reported[0] as Error).message).toBe('no usable credentials')
+  })
+
   it('survives a resolver that throws, and stops when asked', async () => {
     const poller = new UsagePoller({
       targets: () => {
