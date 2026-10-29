@@ -38,6 +38,13 @@ export interface PoolConfig {
   readonly baseUrl?: string
   /** Background poll interval in milliseconds. */
   readonly pollIntervalMs?: number
+  /**
+   * Re-choose the account of a session after it compacts; default true.
+   *
+   * A compacted session sends a rebuilt context, so its cache is paid anew
+   * either way and the account may as well be chosen under the load policy.
+   */
+  readonly repinOnCompaction?: boolean
 }
 
 /** Configuration with defaults applied. */
@@ -47,6 +54,7 @@ export interface ResolvedPoolConfig {
   readonly thresholdPercent: number
   readonly baseUrl: string
   readonly pollIntervalMs: number
+  readonly repinOnCompaction: boolean
 }
 
 /** A configuration problem, with a path naming the offending field. */
@@ -161,11 +169,17 @@ export function resolveConfig(raw: unknown): ResolvedPoolConfig {
     throw new ConfigError('baseUrl', 'must be an http(s) URL')
   }
 
+  const repinOnCompaction = record.repinOnCompaction ?? true
+  if (typeof repinOnCompaction !== 'boolean') {
+    throw new ConfigError('repinOnCompaction', 'must be a boolean')
+  }
+
   return {
     keys,
     policy: policy as PolicyName,
     thresholdPercent: percentage(record, DEFAULT_THRESHOLD_PERCENT),
     baseUrl,
     pollIntervalMs: interval(record),
+    repinOnCompaction,
   }
 }

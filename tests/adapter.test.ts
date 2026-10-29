@@ -60,7 +60,7 @@ function call(provider = 'opencode-go', model = 'deepseek-v4-pro'): AdapterCall 
 function build(options: {
   adapters: ReadonlyMap<string, InnerAdapter>
   pool?: KeyPool
-  affinityOf?: (options: AdapterCall) => string
+  conversationOf?: (options: AdapterCall) => string
   failed?: Array<{ keyId: string; error: unknown }>
 }): PoolAdapter {
   return new PoolAdapter(
@@ -68,7 +68,7 @@ function build(options: {
       pool: options.pool ?? new KeyPool({ keys: [{ id: 'a' }, { id: 'b' }], policy: 'sticky' }),
       adapters: options.adapters,
       catalog: catalog(),
-      affinityOf: options.affinityOf ?? (() => 'root'),
+      conversationOf: options.conversationOf ?? (() => 'root'),
       onError: (detail) => options.failed?.push(detail),
     },
     ['opencode-go'],
@@ -117,7 +117,7 @@ describe('PoolAdapter catalog surface', () => {
             pool: new KeyPool({ keys: [{ id: 'a' }], policy: 'sticky' }),
             adapters: new Map(),
             catalog: catalog(),
-            affinityOf: () => 'root',
+            conversationOf: () => 'root',
           },
           [],
         ),
@@ -149,7 +149,7 @@ describe('PoolAdapter dispatch', () => {
         ['a', first.adapter],
         ['b', second.adapter],
       ]),
-      affinityOf: () => 'root',
+      conversationOf: () => 'root',
     })
 
     await drain(adapter.stream(call()))

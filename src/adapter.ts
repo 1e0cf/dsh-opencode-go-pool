@@ -95,8 +95,12 @@ export interface PoolAdapterOptions {
   readonly adapters: ReadonlyMap<string, InnerAdapter>
   /** Account-neutral source for model metadata and the retry policy. */
   readonly catalog: InnerAdapter
-  /** Which conversation a call belongs to. */
-  readonly affinityOf: (options: AdapterCall) => string
+  /**
+   * Which session a call belongs to — the raw session id, not the lineage
+   * root: pins are per session so that a compaction re-pin in a parent leaves
+   * a running child where its cache is.
+   */
+  readonly conversationOf: (options: AdapterCall) => string
   /** Observe a failed dispatch, after the pool has reacted to it. */
   readonly onError?: (detail: { keyId: string; error: unknown }) => void
 }
@@ -198,13 +202,13 @@ export class PoolAdapter implements InnerAdapter {
   }
 
   async *#dispatch(options: AdapterCall): AsyncIterable<unknown> {
-    const affinity = this.#options.affinityOf(options)
-    const selection = await this.#options.pool.resolve(affinity)
-    if (selection === null) throw new PoolExhaustedError(affinity, this.#blocked())
+    const conversation = this.#options.conversationOf(options)
+    const selection = await this.#options.pool.resolve(conversation)
+    if (selection === null) throw new PoolExhaustedError(conversation, this.#blocked())
 
     const inner = this.#options.adapters.get(selection.keyId)
     if (inner === undefined) {
-      throw new Error(`no adapter for pooled key "${selection.keyId}" (conversation "${affinity}")`)
+      throw new Error(`no adapter for pooled key "${selection.keyId}" (session "${conversation}")`)
     }
 
     try {

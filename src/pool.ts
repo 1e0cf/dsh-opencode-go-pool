@@ -4,9 +4,16 @@
  *
  * The pool is deliberately transport-free and harness-free. It owns three
  * pieces of state — the last usage reading per key, a local block mark, and the
- * affinity ⇒ key pins — and answers one question: what should serve this
+ * session ⇒ key pins — and answers one question: what should serve this
  * conversation now. Writing a pin is delegated to {@link PinStore}, because the
  * place a pin lives is the caller's decision (the harness session log).
+ *
+ * Pins belong to the session that made the request, and a session inherits the
+ * pin of the nearest ancestor that has one — a subagent or a fork starts where
+ * its parent is, which is what keeps the whole conversation inside one
+ * provider-side cache bucket. The inherited pin is then written into the
+ * session's own log, so a later change on the ancestor (a compaction re-pin)
+ * does not drag a running child along with it.
  *
  * A local block mark matters because the usage endpoint lags: a request can
  * fail with an exhausted quota while the poll a minute ago still reports a
@@ -39,12 +46,18 @@ export interface PoolKey {
   readonly orgId?: string
 }
 
-/** Where affinity pins are persisted. */
+/**
+ * Where session pins are persisted.
+ *
+ * A store answers with the pin that still applies, or nothing — deciding that a
+ * pin was invalidated (a compaction in between) is the store's business, so the
+ * pool never has to reason about staleness.
+ */
 export interface PinStore {
-  /** The key pinned to `affinity`, or `undefined`. */
-  get(affinity: string): Promise<string | undefined>
-  /** Persist a pin; `affinity` may be written more than once over its life. */
-  set(affinity: string, keyId: string): Promise<void>
+  /** The pin that still applies to one session, or `undefined`. */
+  get(sessionId: string): Promise<string | undefined>
+  /** Persist a pin; a session may be written more than once over its life. */
+  set(sessionId: string, keyId: string): Promise<void>
 }
 
 /** Pool configuration, all of it fixed at construction. */
@@ -56,6 +69,12 @@ export interface PoolOptions {
   readonly thresholdPercent?: number
   /** Pin persistence; without one pins live only in memory. */
   readonly pins?: PinStore
+  /**
+   * Live ancestor chain of one session, nearest first and including the
+   * session itself. Used to inherit a pin; without it every session starts
+   * unattached.
+   */
+  readonly lineageOf?: (sessionId: string) => Promise<readonly string[]>
 }
 
 /** Per-key view for diagnostics and logging. */
@@ -85,12 +104,12 @@ interface Entry {
 export class MemoryPinStore implements PinStore {
   readonly #pins = new Map<string, string>()
 
-  async get(affinity: string): Promise<string | undefined> {
-    return this.#pins.get(affinity)
+  async get(sessionId: string): Promise<string | undefined> {
+    return this.#pins.get(sessionId)
   }
 
-  async set(affinity: string, keyId: string): Promise<void> {
-    this.#pins.set(affinity, keyId)
+  async set(sessionId: string, keyId: string): Promise<void> {
+    this.#pins.set(sessionId, keyId)
   }
 }
 
@@ -101,7 +120,8 @@ export class KeyPool {
   readonly #policy: PolicyName
   readonly #thresholdPercent: number
   readonly #pins: PinStore | undefined
-  /** Affinity ⇒ key, so a pin is read from storage at most once per process. */
+  readonly #lineageOf: ((sessionId: string) => Promise<readonly string[]>) | undefined
+  /** Session ⇒ key, so a pin is read from storage at most once per process. */
   readonly #known = new Map<string, string>()
 
   constructor(options: PoolOptions) {
@@ -117,6 +137,7 @@ export class KeyPool {
     this.#policy = options.policy
     this.#thresholdPercent = options.thresholdPercent ?? DEFAULT_THRESHOLD_PERCENT
     this.#pins = options.pins
+    this.#lineageOf = options.lineageOf
   }
 
   /** Configured keys in configuration order. */
@@ -203,35 +224,49 @@ export class KeyPool {
    * @param affinity - conversation affinity id.
    * @returns the chosen key, or `null` when nothing can serve.
    */
-  async resolve(affinity: string): Promise<Selection | null> {
-    const pin = await this.#pinOf(affinity)
+  async resolve(conversation: string): Promise<Selection | null> {
+    const pin = await this.#pinOf(conversation)
     const selection = selectKey(this.#policy, {
-      affinity,
+      affinity: conversation,
       keys: this.report().map((report) => report.assessment),
       pin,
       thresholdPercent: this.#thresholdPercent,
     })
 
     if (selection === null) return null
-    if (!selection.pinned) await this.#pin(affinity, selection.keyId)
+    if (!selection.pinned) await this.#pin(conversation, selection.keyId)
     return selection
   }
 
-  /** The key currently pinned to one affinity, from memory or storage. */
-  async pinned(affinity: string): Promise<string | undefined> {
-    return this.#pinOf(affinity)
+  /** The key currently pinned to one session, from memory or storage. */
+  async pinned(conversation: string): Promise<string | undefined> {
+    return this.#pinOf(conversation)
   }
 
-  async #pinOf(affinity: string): Promise<string | undefined> {
-    const known = this.#known.get(affinity)
+  async #pinOf(conversation: string): Promise<string | undefined> {
+    const known = this.#known.get(conversation)
     if (known !== undefined) return known
-    const stored = await this.#pins?.get(affinity)
-    if (stored !== undefined) this.#known.set(affinity, stored)
-    return stored
+
+    const own = await this.#pins?.get(conversation)
+    if (own !== undefined) {
+      this.#known.set(conversation, own)
+      return own
+    }
+
+    const lineage = (await this.#lineageOf?.(conversation)) ?? [conversation]
+    for (const ancestor of lineage.slice(1)) {
+      const inherited = await this.#pins?.get(ancestor)
+      if (inherited === undefined) continue
+      // Adoption, not a lookup: writing it here is what insulates this session
+      // from a later re-pin of the ancestor.
+      await this.#pin(conversation, inherited)
+      return inherited
+    }
+    return undefined
   }
 
-  async #pin(affinity: string, keyId: string): Promise<void> {
-    this.#known.set(affinity, keyId)
-    await this.#pins?.set(affinity, keyId)
+  async #pin(conversation: string, keyId: string): Promise<void> {
+    this.#known.set(conversation, keyId)
+    await this.#pins?.set(conversation, keyId)
   }
 }

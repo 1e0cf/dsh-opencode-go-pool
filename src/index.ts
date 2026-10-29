@@ -21,7 +21,13 @@
 
 import { PoolAdapter, type AdapterCall, type InnerAdapter } from './adapter.ts'
 import { resolveConfig, ROUTE, type KeyConfig, type ResolvedPoolConfig } from './config.ts'
-import { SessionPinStore, PIN_RECORD, type SessionPinPort } from './pins.ts'
+import {
+  COMPACTION_EVENT,
+  PIN_RECORD_TYPE,
+  SessionPinStore,
+  type LogEvent,
+  type SessionScanPort,
+} from './pins.ts'
 import { UsagePoller, type PollTarget } from './poller.ts'
 import { KeyPool } from './pool.ts'
 import type { KeyUnusableReason } from './policy.ts'
@@ -40,9 +46,6 @@ const SESSION_MODULE: string = '@deepseek-ai/dsh-session'
 const LLM_MODULE: string = '@deepseek-ai/dsh-llm'
 const PI_AI_PLUGIN: string = '@deepseek-ai/dsh-llm-pi-ai'
 const PI_AI_PROVIDER: string = '@earendil-works/pi-ai/providers/opencode-go'
-
-/** Record type this plugin owns inside the session log. */
-const PIN_RECORD_TYPE = `plugin:${name}/${PIN_RECORD}`
 
 /** Provider code that means "this account is spent", not "retry later". */
 const QUOTA_CODE = 'QUOTA_EXCEEDED'
@@ -95,17 +98,25 @@ interface CredentialsLike {
 
 interface SessionEventLike {
   readonly type: string
+  readonly seq: number
   readonly ignorable?: boolean
   readonly data?: unknown
 }
 
 interface PluginRecordLike {
   readonly type: string
+  readonly seq: number
   readonly data: unknown
 }
 
 interface SessionLike {
-  ownEvents(): readonly SessionEventLike[]
+  readonly id?: string
+  readonly header?: { readonly parentSession?: string }
+  /** Number of leading events inherited from a fork parent. */
+  readonly inheritedEventCount?: number
+  /** Length of this session's event log. */
+  readonly seq: number
+  snapshotEvents(fromSeq: number, toSeqExclusive?: number): readonly SessionEventLike[]
 }
 
 interface SessionsLike {
@@ -194,32 +205,83 @@ async function resolveSecret(ctx: PluginContext, reference: string): Promise<str
   )
 }
 
-/** Build the session-log port pins are stored through. */
-async function pinPort(ctx: PluginContext): Promise<SessionPinPort> {
+/**
+ * The log port pins are stored and read through.
+ *
+ * Reads are incremental: the caller passes the sequence it has already folded,
+ * and only the tail comes back, limited to the two record types that matter —
+ * a pin and a context rebuild. Events inherited from a fork parent are skipped,
+ * because a fork starts as its own conversation (the harness itself records no
+ * parent for an ordinary fork).
+ */
+async function scanPort(ctx: PluginContext): Promise<SessionScanPort> {
   const sessions = ctx.get('sessions') as SessionsLike | undefined
   // Imported from the running harness: record helpers are versioned with it,
   // and the specifier is opaque so this package needs no dependency on it.
   const sessionModule = (await import(SESSION_MODULE)) as {
-    appendPluginRecord(session: SessionLike, type: string, data: unknown): unknown
+    appendPluginRecord(session: SessionLike, type: string, data: unknown): number
     pluginRecordOf(event: SessionEventLike): PluginRecordLike | undefined
   }
 
+  const live = (sessionId: string): SessionLike | undefined => sessions?.get(sessionId)
+
   return {
-    read(affinity: string): unknown {
-      const session = sessions?.get(affinity)
-      if (session === undefined) return undefined
-      const events = session.ownEvents()
-      for (let index = events.length - 1; index >= 0; index -= 1) {
-        const record = sessionModule.pluginRecordOf(events[index]!)
-        if (record?.type === PIN_RECORD_TYPE) return record.data
+    read(sessionId: string, fromSeq: number, toSeqExclusive: number): readonly LogEvent[] {
+      const session = live(sessionId)
+      if (session === undefined) return []
+      const start = Math.max(fromSeq, session.inheritedEventCount ?? 0)
+      if (start >= toSeqExclusive) return []
+
+      const events: LogEvent[] = []
+      for (const event of session.snapshotEvents(start, toSeqExclusive)) {
+        const record = sessionModule.pluginRecordOf(event)
+        if (record?.type === PIN_RECORD_TYPE) {
+          events.push({ type: PIN_RECORD_TYPE, seq: Number(record.seq), data: record.data })
+        } else if (event.type === COMPACTION_EVENT) {
+          events.push({ type: COMPACTION_EVENT, seq: Number(event.seq), data: event.data })
+        }
       }
-      return undefined
+      return events
     },
-    append(affinity: string, data: { keyId: string }): void {
-      const session = sessions?.get(affinity)
-      if (session === undefined) throw new Error(`conversation "${affinity}" has no live session`)
-      sessionModule.appendPluginRecord(session, PIN_RECORD_TYPE, data)
+    endSeq(sessionId: string): number | undefined {
+      return live(sessionId)?.seq
     },
+    floorSeq(sessionId: string): number {
+      return live(sessionId)?.inheritedEventCount ?? 0
+    },
+    append(sessionId: string, data: { keyId: string }): number {
+      const session = live(sessionId)
+      if (session === undefined) throw new Error(`conversation "${sessionId}" has no live session`)
+      return Number(sessionModule.appendPluginRecord(session, PIN_RECORD_TYPE, data))
+    },
+  }
+}
+
+/**
+ * Live ancestry of one session, nearest first.
+ *
+ * A conversation's key travels down the parent chain, so a subagent or a fork
+ * starts on the account its parent uses. Only live ancestors are followed: a
+ * resumed session whose parent is gone stands alone, exactly as the harness
+ * resolves lineage for the cache header.
+ */
+function lineageOf(ctx: PluginContext): (sessionId: string) => Promise<readonly string[]> {
+  const sessions = ctx.get('sessions') as SessionsLike | undefined
+  return async (sessionId: string) => {
+    const chain: string[] = [sessionId]
+    if (sessions === undefined) return chain
+    let current = sessions.get(sessionId)
+    const seen = new Set<string>([sessionId])
+    while (current !== undefined) {
+      const parent = current.header?.parentSession
+      if (parent === undefined || seen.has(parent)) break
+      const live = sessions.get(parent)
+      if (live === undefined) break
+      seen.add(parent)
+      chain.push(parent)
+      current = live
+    }
+    return chain
   }
 }
 
@@ -276,10 +338,16 @@ function buildAdapters(
   return adapters
 }
 
-/** Which conversation a dispatch belongs to. */
-function affinityOf(options: AdapterCall): string {
-  if (typeof options.sessionAffinity === 'string') return options.sessionAffinity
+/**
+ * Which session a dispatch belongs to.
+ *
+ * The raw session id, deliberately: pins are per session, while
+ * `sessionAffinity` stays the harness's business of routing the provider-side
+ * cache bucket.
+ */
+function conversationOf(options: AdapterCall): string {
   if (typeof options.sessionId === 'string') return options.sessionId
+  if (typeof options.sessionAffinity === 'string') return options.sessionAffinity
   return 'unattributed'
 }
 
@@ -340,10 +408,12 @@ export function apply(ctx: PluginContext, raw: unknown): void {
       keys: config.keys,
       policy: config.policy,
       thresholdPercent: config.thresholdPercent,
-      pins: new SessionPinStore(await pinPort(ctx), {
+      pins: new SessionPinStore(await scanPort(ctx), {
+        repinOnCompaction: config.repinOnCompaction,
         onError: (detail) =>
           logger.warn('opencode-go-pool: pin %s failed: %o', detail.operation, detail.error),
       }),
+      lineageOf: lineageOf(ctx),
     })
 
     const provider = opencodeGoProvider()
@@ -354,7 +424,7 @@ export function apply(ctx: PluginContext, raw: unknown): void {
         pool,
         adapters,
         catalog,
-        affinityOf,
+        conversationOf,
         onError: ({ keyId, error }) =>
           logger.warn('opencode-go-pool: key "%s" refused a request: %o', keyId, error),
       },
