@@ -47,8 +47,40 @@ A hand-built profile is enough: `listModels` returns the full catalog (29 models
 - Usage lives at `https://opencode.ai/zen/go/v1/usage`. The two prefixes differ; the usage client
   defaults to the `zen` one.
 
+## 3. Live harness, in-session re-pin
+
+Observed on `2026-10-29` with the desktop build (`0.2.2-alpha.2`, `feat/session-affinity`), two
+OpenCode Go accounts, `policy: threshold`, `thresholdPercent: 90`, `primary` at 99% monthly and
+`secondary` at 0%.
+
+The session log is the record of truth — a pin is one line:
+
+```
+compaction/summary                     seq 5145  19:11:03
+plugin:opencode-go-pool/pin  {keyId:"secondary"}  seq 5159  19:11:13
+```
+
+The compaction invalidated the existing `primary` pin, the next request asked the store again,
+found it stale, re-picked by policy and wrote `secondary` — no restart involved. The cache side
+confirms the move landed on another backend:
+
+| turn                        | key         | `input` | `cacheRead` |
+| --------------------------- | ----------- | ------- | ----------- |
+| before the compaction       | `primary`   | 1 133   | 74 112      |
+| first turn after the re-pin | `secondary` | 23 421  | **256**     |
+
+A cache read of 256 against a 74k prefix means the prefix cache was empty: a different account,
+which is exactly what the rotation is supposed to cost at a conversation boundary and never
+inside one.
+
+`/usage` is not a usable signal here — one compaction is ~80k tokens against a monthly allowance,
+so `secondary` still reported `0/0/0` afterwards. Pins in the log are the observable.
+
+A cold start showed the other edge: a process that has booted but not yet polled has no readings,
+so the first choice ties every account at 0% and falls back to configuration order. The pool now
+waits for the first sweep before choosing for an unattached conversation.
+
 ## Not verified yet
 
-- The plugin mounted inside a running harness: route takeover, `DUPLICATE_ADAPTER` retry, pin
-  records written and read back, and the background poller.
+- `DUPLICATE_ADAPTER` retry after another plugin re-registers the route.
 - A real quota failure mid-conversation, which needs two accounts and a spent one.

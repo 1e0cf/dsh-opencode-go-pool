@@ -20,6 +20,8 @@ Two consequences worth knowing:
 - A nearly spent account (90% by default) still serves the conversations pinned to it. It is only
   avoided when a _new_ conversation picks an account, because starting there would force a move
   soon after.
+- Right after the harness starts, the first conversation waits for the first usage sweep (one HTTP
+  round trip) instead of tying every account at "unknown" and picking by configuration order.
 
 ## Requirements
 
@@ -77,14 +79,18 @@ its window.
 
 ## Status
 
-Working: policy, pool, usage polling, pin storage, adapter, plugin wiring — 77 unit tests.
+Working: policy, pool, usage polling, pin storage, adapter, plugin wiring — 92 unit tests.
 
 Verified at the wire level: one adapter per account produces requests with that account's
 credential, and `x-opencode-session` carries the lineage root while the raw session id travels
 separately ([docs/verification.md](docs/verification.md)).
 
-Not yet verified: the plugin running inside a live harness (route takeover, pins read back from the
-session log, background polling) and a real mid-conversation quota failure. No settings UI.
+Verified in a live harness: route takeover, pins written to and read back from the session log, a
+re-pick after compaction that moved the conversation to the second account mid-session, and the
+background poller feeding the pool.
+
+Not yet verified: a real mid-conversation quota failure, and route takeover after another plugin
+re-registers it. No settings UI.
 
 ## Development
 

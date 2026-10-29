@@ -112,6 +112,8 @@ export class UsagePoller {
   readonly #options: PollerOptions
   #timer: ReturnType<typeof setTimeout> | undefined
   #stopped = true
+  /** The first sweep, so a caller can wait for readings instead of guessing. */
+  #first: Promise<void> | undefined
 
   constructor(options: PollerOptions) {
     this.#options = options
@@ -130,7 +132,19 @@ export class UsagePoller {
   start(): void {
     if (!this.#stopped) return
     this.#stopped = false
-    void this.#sweep()
+    this.#first = this.#sweep()
+    void this.#first
+  }
+
+  /**
+   * Resolves once the first sweep has settled.
+   *
+   * Sweeps start without a delay, but the readings still arrive one HTTP round
+   * trip later — and a request that needs a key meanwhile would have to choose
+   * with an empty picture. Waiting here costs one round trip, once per process.
+   */
+  whenSettled(): Promise<void> {
+    return this.#first ?? Promise.resolve()
   }
 
   /** Stop after the sweep in flight, if any. */

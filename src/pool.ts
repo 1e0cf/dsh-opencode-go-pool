@@ -75,6 +75,15 @@ export interface PoolOptions {
    * unattached.
    */
   readonly lineageOf?: (sessionId: string) => Promise<readonly string[]>
+  /**
+   * Resolves when the first usage readings are in, if they ever come.
+   *
+   * Right after a process start no key has been polled yet, so every account
+   * looks equally free and the choice falls back to configuration order — which
+   * can pin a conversation to the account that is nearly spent. An unattached
+   * conversation waits for this before choosing, once per process.
+   */
+  readonly ready?: () => Promise<void>
 }
 
 /** Per-key view for diagnostics and logging. */
@@ -121,8 +130,11 @@ export class KeyPool {
   readonly #thresholdPercent: number
   readonly #pins: PinStore | undefined
   readonly #lineageOf: ((sessionId: string) => Promise<readonly string[]>) | undefined
+  readonly #ready: (() => Promise<void>) | undefined
   /** Session ⇒ key, so a pin is read from storage at most once per process. */
   readonly #known = new Map<string, string>()
+  /** First reading gate, memoised so the wait happens at most once. */
+  #readings: Promise<void> | undefined
 
   constructor(options: PoolOptions) {
     const entries = new Map<string, Entry>()
@@ -138,6 +150,7 @@ export class KeyPool {
     this.#thresholdPercent = options.thresholdPercent ?? DEFAULT_THRESHOLD_PERCENT
     this.#pins = options.pins
     this.#lineageOf = options.lineageOf
+    this.#ready = options.ready
   }
 
   /** Configured keys in configuration order. */
@@ -226,6 +239,9 @@ export class KeyPool {
    */
   async resolve(conversation: string): Promise<Selection | null> {
     const pin = await this.#pinOf(conversation)
+    // An attached conversation is already decided; only a fresh choice needs
+    // the readings, and choosing without them pins whatever comes first.
+    if (pin === undefined) await this.#firstReading()
     const selection = selectKey(this.#policy, {
       affinity: conversation,
       keys: this.report().map((report) => report.assessment),
@@ -241,6 +257,20 @@ export class KeyPool {
   /** The key currently pinned to one session, from memory or storage. */
   async pinned(conversation: string): Promise<string | undefined> {
     return this.#pinOf(conversation)
+  }
+
+  /**
+   * Wait for the process's first usage readings, at most once.
+   *
+   * Only a pool with nothing observed waits, and a failing or hanging source is
+   * never allowed to block routing: an error is swallowed and the choice falls
+   * back to what the pool knows, which is the pre-existing behaviour.
+   */
+  async #firstReading(): Promise<void> {
+    if (this.#ready === undefined) return
+    if (this.#order.some((id) => this.#entries.get(id)!.usage !== null)) return
+    this.#readings ??= this.#ready().catch(() => {})
+    await this.#readings
   }
 
   async #pinOf(conversation: string): Promise<string | undefined> {

@@ -404,6 +404,10 @@ export function apply(ctx: PluginContext, raw: unknown): void {
       import(LLM_MODULE) as Promise<LlmModule>,
     ])
 
+    // Declared ahead of the pool so the pool can wait for the first readings,
+    // while the poller itself needs the pool to record them.
+    let poller: UsagePoller | undefined
+
     const pool = new KeyPool({
       keys: config.keys,
       policy: config.policy,
@@ -414,6 +418,9 @@ export function apply(ctx: PluginContext, raw: unknown): void {
           logger.warn('opencode-go-pool: pin %s failed: %o', detail.operation, detail.error),
       }),
       lineageOf: lineageOf(ctx),
+      // A process that has just booted has no readings yet; choosing then means
+      // choosing by configuration order, which may be the nearly spent account.
+      ready: () => poller?.whenSettled() ?? Promise.resolve(),
     })
 
     const provider = opencodeGoProvider()
@@ -431,11 +438,10 @@ export function apply(ctx: PluginContext, raw: unknown): void {
       [ROUTE],
     )
 
-    const offRegistration = registerRoute(ctx, adapter)
     /** Keys already reported as missing a credential, so the log stays readable. */
     const unpollable = new Set<string>()
 
-    const poller = new UsagePoller({
+    poller = new UsagePoller({
       baseUrl: config.baseUrl,
       intervalMs: config.pollIntervalMs,
       // One account without a stored secret must not stop the others from
@@ -481,10 +487,13 @@ export function apply(ctx: PluginContext, raw: unknown): void {
         )
       },
     })
+    // Registered last: the route must not take traffic before there is a poller
+    // to wait for, or the first request would still choose without readings.
+    const offRegistration = registerRoute(ctx, adapter)
     poller.start()
 
     ctx.on('dispose', () => {
-      poller.stop()
+      poller?.stop()
       offRegistration?.()
     })
   })().catch((error) => {

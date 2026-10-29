@@ -195,6 +195,74 @@ describe('KeyPool resolution', () => {
     expect(await subject.resolve('root')).toBeNull()
   })
 
+  it('waits for the first readings before an unattached conversation chooses', async () => {
+    let release!: () => void
+    const readings = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const subject = new KeyPool({
+      keys: [{ id: 'a' }, { id: 'b' }],
+      policy: 'threshold',
+      thresholdPercent: 90,
+      ready: () => readings,
+    })
+
+    const pending = subject.resolve('fresh')
+    // Nothing observed yet: the choice must not have happened.
+    await Bun.sleep(0)
+    subject.observe('a', usage(99), 1)
+    subject.observe('b', usage(0), 1)
+    release()
+
+    expect(await pending).toEqual({ keyId: 'b', pinned: false, avoided: ['a'] })
+  })
+
+  it('does not wait for readings once a key has been observed', async () => {
+    let asked = false
+    const subject = pool({
+      policy: 'threshold',
+      ready: () => {
+        asked = true
+        return new Promise<void>(() => {})
+      },
+    })
+    subject.observe('a', usage(99), 1)
+    subject.observe('b', usage(10), 1)
+
+    const selection = await subject.resolve('fresh')
+
+    expect(selection?.keyId).toBe('b')
+    expect(asked).toBe(false)
+  })
+
+  it('does not make an attached conversation wait for readings', async () => {
+    let asked = false
+    const pins = spyStore({ root: 'a' })
+    const subject = pool({
+      pins,
+      ready: () => {
+        asked = true
+        return new Promise<void>(() => {})
+      },
+    })
+
+    const selection = await subject.resolve('root')
+
+    expect(selection).toEqual({ keyId: 'a', pinned: true, avoided: [] })
+    expect(asked).toBe(false)
+  })
+
+  it('routes anyway when the readings never arrive', async () => {
+    const subject = pool({
+      policy: 'threshold',
+      ready: async () => {
+        throw new Error('usage endpoint down')
+      },
+    })
+
+    expect(await subject.resolve('fresh')).toMatchObject({ keyId: 'a', pinned: false })
+  })
+
   it('reports pins without writing new ones', async () => {
     const pins = spyStore()
     const subject = pool({ pins })

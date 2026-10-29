@@ -99,6 +99,28 @@ describe('UsagePoller', () => {
     expect(seen).toHaveLength(2)
   })
 
+  it('lets a caller wait for the first sweep it started', async () => {
+    const seen: PollOutcome[] = []
+    const poller = new UsagePoller({
+      targets: () => targets,
+      onOutcome: (outcome) => seen.push(outcome),
+      fetchImpl: fetchByKey({ 'key-a': ok, 'key-b': ok }),
+    })
+
+    expect(seen).toHaveLength(0)
+    poller.start()
+    await poller.whenSettled()
+    poller.stop()
+
+    expect(seen).toHaveLength(2)
+  })
+
+  it('settles immediately when nothing was started', async () => {
+    const poller = new UsagePoller({ targets: () => targets, onOutcome: () => {} })
+
+    await expect(poller.whenSettled()).resolves.toBeUndefined()
+  })
+
   it('does nothing when no key is configured', async () => {
     const seen: PollOutcome[] = []
     const poller = new UsagePoller({
