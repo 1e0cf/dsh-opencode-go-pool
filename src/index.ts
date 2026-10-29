@@ -37,6 +37,7 @@ export const inject = ['llm']
  * without them present while still importing whatever the harness installed.
  */
 const SESSION_MODULE: string = '@deepseek-ai/dsh-session'
+const LLM_MODULE: string = '@deepseek-ai/dsh-llm'
 const PI_AI_PLUGIN: string = '@deepseek-ai/dsh-llm-pi-ai'
 const PI_AI_PROVIDER: string = '@earendil-works/pi-ai/providers/opencode-go'
 
@@ -129,7 +130,21 @@ interface PiAiPluginModule {
     profiles: () => ReadonlyMap<string, unknown>
     resolveApiKey: () => Promise<string | undefined>
     auth: unknown
+    resolveAttachments?: () => unknown
+    resolveImageAccess?: (attachments: unknown, ref: unknown) => unknown
   }) => InnerAdapter
+}
+
+interface LlmModule {
+  resolveImageAttachmentAccess(
+    attachments: unknown,
+    processPathFromHostPath: (hostPath: string) => string | undefined,
+    ref: unknown,
+  ): unknown
+}
+
+interface FsLike {
+  processPathFromHostPath(hostPath: string): string | undefined
 }
 
 interface ProviderModule {
@@ -213,6 +228,7 @@ function buildAdapters(
   keys: readonly KeyConfig[],
   PiAiAdapter: PiAiPluginModule['PiAiAdapter'],
   provider: { readonly name?: string },
+  llm: LlmModule,
   ctx: PluginContext,
 ): Map<string, InnerAdapter> {
   const profile = {
@@ -235,6 +251,14 @@ function buildAdapters(
         // Credential per account: the only thing that differs between these
         // adapters is which stored secret they hand pi-ai.
         resolveApiKey: () => resolveSecret(ctx, key.apiKeyEnv),
+        // Image input needs the durable attachment service, as in `llm-pi-ai`.
+        resolveAttachments: () => ctx.get('attachments'),
+        resolveImageAccess: (attachments, ref) =>
+          llm.resolveImageAttachmentAccess(
+            attachments,
+            (hostPath) => (ctx.get('fs') as FsLike | undefined)?.processPathFromHostPath(hostPath),
+            ref,
+          ),
         // Unused while every call carries an explicit key, but required by the
         // adapter contract.
         auth: {
@@ -306,9 +330,10 @@ export function apply(ctx: PluginContext, raw: unknown): void {
   const logger = loggerOf(ctx)
 
   void (async () => {
-    const [{ PiAiAdapter }, { opencodeGoProvider }] = await Promise.all([
+    const [{ PiAiAdapter }, { opencodeGoProvider }, llm] = await Promise.all([
       import(PI_AI_PLUGIN) as Promise<PiAiPluginModule>,
       import(PI_AI_PROVIDER) as Promise<ProviderModule>,
+      import(LLM_MODULE) as Promise<LlmModule>,
     ])
 
     const pool = new KeyPool({
@@ -322,7 +347,7 @@ export function apply(ctx: PluginContext, raw: unknown): void {
     })
 
     const provider = opencodeGoProvider()
-    const adapters = buildAdapters(config.keys, PiAiAdapter, provider, ctx)
+    const adapters = buildAdapters(config.keys, PiAiAdapter, provider, llm, ctx)
     const catalog = adapters.get(config.keys[0]!.id)!
     const adapter = new PoolAdapter(
       {
