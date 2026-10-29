@@ -212,7 +212,8 @@ describe('blockReasonOf', () => {
   it('recognizes quota codes and ignores everything else', () => {
     expect(blockReasonOf(coded('QUOTA_EXCEEDED'))).toBe('rate-limited')
     expect(blockReasonOf(coded('INSUFFICIENT_QUOTA'))).toBe('rate-limited')
-    expect(blockReasonOf(coded('AUTH'))).toBeNull()
+    expect(blockReasonOf(coded('AUTH'))).toBe('unauthorized')
+    expect(blockReasonOf(coded('INVALID_CREDENTIAL'))).toBe('unauthorized')
     expect(blockReasonOf(new Error('plain'))).toBeNull()
     expect(blockReasonOf('not an error')).toBeNull()
   })

@@ -44,7 +44,7 @@ export interface KeyState {
 }
 
 /** Why a key cannot serve, independent of any policy. */
-export type KeyUnusableReason = 'rate-limited' | 'exhausted'
+export type KeyUnusableReason = 'rate-limited' | 'exhausted' | 'unauthorized'
 
 /** Verdict for one key, plus the numbers a policy needs. */
 export interface KeyAssessment {
@@ -208,8 +208,13 @@ export function selectKey(policy: PolicyName, context: SelectionContext): Select
   const usable = context.keys.filter((key) => key.usable)
   if (usable.length === 0) return null
 
-  const belowThreshold = usable.filter((key) => consumedOf(key) < context.thresholdPercent)
-  const candidates = belowThreshold.length > 0 ? belowThreshold : usable
+  // A key nobody has polled yet could be spent or rejected, so an unpinned
+  // conversation prefers keys with a reading. The unobserved ones stay in play
+  // when they are all there is — a fresh install must still route.
+  const observed = usable.filter((key) => key.observed)
+  const preferred = observed.length > 0 ? observed : usable
+  const belowThreshold = preferred.filter((key) => consumedOf(key) < context.thresholdPercent)
+  const candidates = belowThreshold.length > 0 ? belowThreshold : preferred
   const avoided = usable.filter((key) => !candidates.includes(key)).map((key) => key.id)
 
   return {

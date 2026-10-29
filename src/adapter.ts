@@ -63,6 +63,14 @@ const QUOTA_CODES: ReadonlySet<string> = new Set([
   'USAGE_LIMIT_REACHED',
 ])
 
+/** Provider codes that mean the account's own credential is refused. */
+const AUTH_CODES: ReadonlySet<string> = new Set([
+  'AUTH',
+  'INVALID_CREDENTIAL',
+  'UNAUTHORIZED',
+  'MISSING_CREDENTIAL',
+])
+
 /** Raised when every configured key is unable to serve. */
 export class PoolExhaustedError extends Error {
   /** Counts as a quota failure for retry and reporting purposes. */
@@ -115,7 +123,10 @@ function codeOf(error: unknown): string | undefined {
 /** Whether a failure means the account itself is spent. */
 export function blockReasonOf(error: unknown): KeyUnusableReason | null {
   const code = codeOf(error)
-  return code !== undefined && QUOTA_CODES.has(code) ? 'rate-limited' : null
+  if (code === undefined) return null
+  if (QUOTA_CODES.has(code)) return 'rate-limited'
+  if (AUTH_CODES.has(code)) return 'unauthorized'
+  return null
 }
 
 /**

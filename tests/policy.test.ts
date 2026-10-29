@@ -204,10 +204,16 @@ describe('selectKey', () => {
     expect(chosen.size).toBeGreaterThan(1)
   })
 
-  it('treats an unobserved key as empty rather than refusing it', () => {
-    const selection = selectKey('threshold', context([key('a', 80), key('b', null)]))
+  it('prefers a key with a reading over one nobody polled', () => {
+    const selection = selectKey('threshold', context([key('a', 85), key('b', null)]))
 
-    expect(selection?.keyId).toBe('b')
+    expect(selection?.keyId).toBe('a')
+  })
+
+  it('still routes when every key is unobserved', () => {
+    const selection = selectKey('sticky', context([key('a', null), key('b', null)]))
+
+    expect(selection?.keyId).toBe('a')
   })
 
   it('falls back to a nearly spent key instead of refusing to serve', () => {

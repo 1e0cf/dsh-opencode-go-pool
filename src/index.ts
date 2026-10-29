@@ -400,8 +400,9 @@ export function apply(ctx: PluginContext, raw: unknown): void {
           pool.observe(outcome.keyId, outcome.usage, outcome.at)
           return
         }
-        // A rejected key is a configuration problem, not a quota one: it is
-        // reported and left alone, so the request path keeps showing the truth.
+        // A key the gateway refuses cannot serve, so it leaves the rotation
+        // until the credential changes: polling it again keeps it blocked.
+        if (outcome.code === 'unauthorized') pool.block(outcome.keyId, 'unauthorized')
         logger.warn(
           'opencode-go-pool: usage poll for key "%s" failed (%s): %s',
           outcome.keyId,
