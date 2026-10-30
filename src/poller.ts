@@ -50,6 +50,22 @@ export type PollOutcome =
 export const DEFAULT_INTERVAL_MS = 60_000
 
 /**
+ * How soon an empty sweep is retried while the pool still has no reading.
+ *
+ * A host mounts this plugin before the profile's services, so the first sweep can
+ * legitimately find no credential yet. Retrying on the normal interval would
+ * leave the pool blind for a minute — long enough for the first request of the
+ * process to pin whatever account comes first.
+ */
+export const DEFAULT_READINESS_RETRY_MS = 1_000
+
+/** Give up waiting for a usable sweep after this long, so routing never blocks. */
+export const DEFAULT_READINESS_TIMEOUT_MS = 10_000
+
+/** Empty sweeps tolerated before the retry cadence falls back to the interval. */
+const EMPTY_SWEEP_LIMIT = 10
+
+/**
  * Poll every target once, concurrently.
  *
  * @param targets - keys to poll in this sweep.
@@ -99,6 +115,10 @@ export interface PollerOptions extends PollDeps {
   readonly onError?: (error: unknown) => void
   /** Sweep interval, {@link DEFAULT_INTERVAL_MS} by default. */
   readonly intervalMs?: number
+  /** Delay before retrying a sweep that produced no reading at all. */
+  readonly readinessRetryMs?: number
+  /** Longest wait for the pool's first reading before routing proceeds blind. */
+  readonly readinessTimeoutMs?: number
 }
 
 /**
@@ -112,8 +132,11 @@ export class UsagePoller {
   readonly #options: PollerOptions
   #timer: ReturnType<typeof setTimeout> | undefined
   #stopped = true
-  /** The first sweep, so a caller can wait for readings instead of guessing. */
+  /** Settles when the pool has readings, or when waiting any longer is pointless. */
   #first: Promise<void> | undefined
+  #settled: () => void = () => {}
+  #readings = false
+  #emptySweeps = 0
 
   constructor(options: PollerOptions) {
     this.#options = options
@@ -132,16 +155,24 @@ export class UsagePoller {
   start(): void {
     if (!this.#stopped) return
     this.#stopped = false
-    this.#first = this.#sweep()
-    void this.#first
+    this.#first = new Promise<void>((resolve) => {
+      this.#settled = resolve
+    })
+    const timeout = setTimeout(
+      () => this.#markReady(),
+      this.#options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS,
+    )
+    timeout.unref?.()
+    void this.#sweep()
   }
 
   /**
-   * Resolves once the first sweep has settled.
+   * Resolves once the pool has a reading it can choose on.
    *
    * Sweeps start without a delay, but the readings still arrive one HTTP round
    * trip later — and a request that needs a key meanwhile would have to choose
-   * with an empty picture. Waiting here costs one round trip, once per process.
+   * with an empty picture. A sweep that found no target at all proves nothing
+   * either, so it is retried quickly instead of being treated as an answer.
    */
   whenSettled(): Promise<void> {
     return this.#first ?? Promise.resolve()
@@ -150,6 +181,8 @@ export class UsagePoller {
   /** Stop after the sweep in flight, if any. */
   stop(): void {
     this.#stopped = true
+    // Nobody can be served by a stopped poller; release whoever waits on it.
+    this.#markReady()
     if (this.#timer !== undefined) {
       clearTimeout(this.#timer)
       this.#timer = undefined
@@ -157,15 +190,31 @@ export class UsagePoller {
   }
 
   async #sweep(): Promise<void> {
+    let observed = 0
     try {
-      await this.once()
+      observed = (await this.once()).length
     } catch (error) {
       // A throwing target resolver must not kill the loop; the next sweep retries.
       this.#options.onError?.(error)
     }
+    if (observed > 0) {
+      this.#emptySweeps = 0
+      this.#markReady()
+    } else if (!this.#readings && ++this.#emptySweeps > EMPTY_SWEEP_LIMIT) {
+      // A host without usable credentials must still route, not hang forever.
+      this.#markReady()
+    }
     if (this.#stopped) return
     const interval = this.#options.intervalMs ?? DEFAULT_INTERVAL_MS
-    this.#timer = setTimeout(() => void this.#sweep(), interval)
+    const retry = this.#options.readinessRetryMs ?? DEFAULT_READINESS_RETRY_MS
+    const delay = this.#readings ? interval : Math.min(interval, retry)
+    this.#timer = setTimeout(() => void this.#sweep(), delay)
     this.#timer.unref?.()
+  }
+
+  #markReady(): void {
+    if (this.#readings) return
+    this.#readings = true
+    this.#settled()
   }
 }

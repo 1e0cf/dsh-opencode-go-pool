@@ -121,6 +121,46 @@ describe('UsagePoller', () => {
     await expect(poller.whenSettled()).resolves.toBeUndefined()
   })
 
+  it('keeps waiting while a sweep finds no target at all', async () => {
+    let ready = false
+    const seen: PollOutcome[] = []
+    const poller = new UsagePoller({
+      targets: () => (ready ? targets : []),
+      onOutcome: (outcome) => seen.push(outcome),
+      fetchImpl: fetchByKey({ 'key-a': ok, 'key-b': ok }),
+      readinessRetryMs: 5,
+      readinessTimeoutMs: 500,
+    })
+
+    let settled = false
+    poller.start()
+    void poller.whenSettled().then(() => {
+      settled = true
+    })
+    await Bun.sleep(30)
+    // A sweep that resolved no credential proves nothing and must not count.
+    expect(settled).toBe(false)
+    ready = true
+    await poller.whenSettled()
+    poller.stop()
+
+    expect(seen).toHaveLength(2)
+  })
+
+  it('releases a waiting caller when it is stopped', async () => {
+    const poller = new UsagePoller({
+      targets: () => [],
+      onOutcome: () => {},
+      readinessRetryMs: 5,
+      readinessTimeoutMs: 10_000,
+    })
+
+    poller.start()
+    poller.stop()
+
+    await expect(poller.whenSettled()).resolves.toBeUndefined()
+  })
+
   it('does nothing when no key is configured', async () => {
     const seen: PollOutcome[] = []
     const poller = new UsagePoller({
