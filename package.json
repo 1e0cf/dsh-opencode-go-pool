@@ -20,8 +20,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=20",
-    "bun": ">=1.4.4"
+    "node": ">=20"
   },
   "keywords": [
     "dsh",
@@ -33,16 +32,17 @@
     "quota"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --target node --packages external --outdir lib",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "bun check",
     "lint": "bun lint src tests",
     "format": "bun fmt src tests",
     "format:check": "bun fmt --check src tests",
     "test": "bun test",
     "gate": "bun run lint && bun run format:check && bun run typecheck && bun run test",
-    "prepare": "bun run build"
+    "prepare": "tsc -p tsconfig.build.json"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.4"
+    "typescript": "^5.9.0",
+    "@types/node": "^22.20.0"
   }
 }
