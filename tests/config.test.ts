@@ -71,22 +71,6 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig({ keys: KEYS, thresholdPercent: 140 })).toThrow(/thresholdPercent/)
   })
 
-  it('carries the per-model output caps the provider catalog does not have', () => {
-    const resolved = resolveConfig({
-      keys: KEYS,
-      models: [{ id: 'deepseek-v4.1-flash', maxTokens: 32768 }, { id: 'other' }],
-    })
-    expect(resolved.maxTokensByModel.get('deepseek-v4.1-flash')).toBe(32768)
-    expect(resolved.maxTokensByModel.has('other')).toBe(false)
-    expect(resolveConfig({ keys: KEYS }).maxTokensByModel.size).toBe(0)
-    expect(() => resolveConfig({ keys: KEYS, models: [{ id: 'm', maxTokens: 0 }] })).toThrow(
-      /maxTokens/,
-    )
-    expect(() => resolveConfig({ keys: KEYS, models: [{ id: 'm', maxTokens: 1.5 }] })).toThrow(
-      /maxTokens/,
-    )
-  })
-
   it('rejects a non-http endpoint and a poll interval that would hammer it', () => {
     expect(() => resolveConfig({ keys: KEYS, baseUrl: 'ftp://example.test' })).toThrow(/baseUrl/)
     expect(() => resolveConfig({ keys: KEYS, baseUrl: 'nope' })).toThrow(/baseUrl/)

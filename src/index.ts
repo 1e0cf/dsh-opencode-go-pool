@@ -288,7 +288,6 @@ function lineageOf(ctx: PluginContext): (sessionId: string) => Promise<readonly 
 /** One pi-ai adapter per account, all sharing the same catalog. */
 function buildAdapters(
   keys: readonly KeyConfig[],
-  configuredMaxTokens: ReadonlyMap<string, number>,
   PiAiAdapter: PiAiPluginModule['PiAiAdapter'],
   provider: { readonly name?: string },
   llm: LlmModule,
@@ -299,7 +298,7 @@ function buildAdapters(
     displayName: provider.name ?? 'OpenCode Go',
     ...PROFILE_DEFAULTS,
     retryPolicy: RETRY_POLICY,
-    configuredMaxTokens,
+    configuredMaxTokens: new Map<string, number>(),
     modelErrors: new Map<string, string>(),
     piProvider: provider,
   }
@@ -425,14 +424,7 @@ export function apply(ctx: PluginContext, raw: unknown): void {
     })
 
     const provider = opencodeGoProvider()
-    const adapters = buildAdapters(
-      config.keys,
-      config.maxTokensByModel,
-      PiAiAdapter,
-      provider,
-      llm,
-      ctx,
-    )
+    const adapters = buildAdapters(config.keys, PiAiAdapter, provider, llm, ctx)
     const catalog = adapters.get(config.keys[0]!.id)!
     const adapter = new PoolAdapter(
       {
