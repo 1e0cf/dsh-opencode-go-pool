@@ -45,6 +45,21 @@ export interface PoolConfig {
    * either way and the account may as well be chosen under the load policy.
    */
   readonly repinOnCompaction?: boolean
+  /**
+   * Output limits per model id, mirroring `llm-pi-ai`'s `models`.
+   *
+   * The pool serves the catalog models of the `opencode-go` provider, and a
+   * catalog entry carries no output limit: without this the request goes out
+   * unbounded and the model answers at whatever length it likes.
+   */
+  readonly models?: readonly ModelLimitConfig[]
+}
+
+/** Per-model overrides the pool forwards to the provider catalog. */
+export interface ModelLimitConfig {
+  readonly id: string
+  /** Default output cap for this model, in tokens. */
+  readonly maxTokens?: number
 }
 
 /** Configuration with defaults applied. */
@@ -55,6 +70,31 @@ export interface ResolvedPoolConfig {
   readonly baseUrl: string
   readonly pollIntervalMs: number
   readonly repinOnCompaction: boolean
+  /** Model id ⇒ output cap, resolved once for the adapter profile. */
+  readonly maxTokensByModel: ReadonlyMap<string, number>
+}
+
+/** Read the per-model output caps, rejecting anything that is not a positive integer. */
+function modelLimits(record: Record<string, unknown>): ReadonlyMap<string, number> {
+  const models = record.models
+  if (models === undefined) return new Map()
+  if (!Array.isArray(models)) throw new ConfigError('models', 'must be a list')
+  const limits = new Map<string, number>()
+  models.forEach((entry, index) => {
+    if (typeof entry !== 'object' || entry === null)
+      throw new ConfigError(`models[${index}]`, 'must be an object')
+    const model = entry as Record<string, unknown>
+    const id = model.id
+    if (typeof id !== 'string' || id === '')
+      throw new ConfigError(`models[${index}].id`, 'must be a non-empty string')
+    const maxTokens = model.maxTokens
+    if (maxTokens === undefined) return
+    if (typeof maxTokens !== 'number' || !Number.isInteger(maxTokens) || maxTokens <= 0) {
+      throw new ConfigError(`models[${index}].maxTokens`, 'must be a positive integer')
+    }
+    limits.set(id, maxTokens)
+  })
+  return limits
 }
 
 /** A configuration problem, with a path naming the offending field. */
@@ -181,5 +221,6 @@ export function resolveConfig(raw: unknown): ResolvedPoolConfig {
     baseUrl,
     pollIntervalMs: interval(record),
     repinOnCompaction,
+    maxTokensByModel: modelLimits(record),
   }
 }

@@ -49,13 +49,14 @@ Two consequences worth knowing:
         orgId: org_... # optional, sent as x-opencode-org-id
 ```
 
-| key                | default                         | meaning                                                         |
-| ------------------ | ------------------------------- | --------------------------------------------------------------- |
-| `keys`             | required                        | accounts in preference order; `id` is `[a-z0-9-]`, max 32       |
-| `policy`           | `sticky`                        | how a conversation without a pin picks an account               |
-| `thresholdPercent` | `90`                            | consumed share above which a new conversation avoids an account |
-| `baseUrl`          | `https://opencode.ai/zen/go/v1` | usage endpoint root                                             |
-| `pollIntervalMs`   | `60000`                         | background usage poll interval, at least 5000                   |
+| key                | default                         | meaning                                                                                                     |
+| ------------------ | ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `keys`             | required                        | accounts in preference order; `id` is `[a-z0-9-]`, max 32                                                   |
+| `policy`           | `sticky`                        | how a conversation without a pin picks an account                                                           |
+| `thresholdPercent` | `90`                            | consumed share above which a new conversation avoids an account                                             |
+| `baseUrl`          | `https://opencode.ai/zen/go/v1` | usage endpoint root                                                                                         |
+| `pollIntervalMs`   | `60000`                         | background usage poll interval, at least 5000                                                               |
+| `models`           | —                               | per-model output caps, e.g. `[{ id: deepseek-v4.1-flash, maxTokens: 32768 }]`; the catalog carries no limit |
 
 ## Policies
 
